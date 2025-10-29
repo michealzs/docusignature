@@ -30,22 +30,36 @@ module Submissions
       bold_italic: FONT_BOLD_ITALIC_NAME
     }.freeze
 
+    PDFA_FONT_VARIANS = {
+      none: FONT_NAME,
+      bold: FONT_BOLD_NAME,
+      italic: FONT_NAME,
+      bold_italic: FONT_BOLD_NAME
+    }.freeze
+
     SIGN_REASON = 'Signed by %<name>s with DocuSeal.com'
 
     RTL_REGEXP = TextUtils::RTL_REGEXP
 
     TEXT_LEFT_MARGIN = 1
     TEXT_TOP_MARGIN = 1
-    MAX_PAGE_ROTATE = 20
+    MAX_PAGE_ROTATE = 50
 
     A4_SIZE = [595, 842].freeze
 
     TESTING_FOOTER = 'Testing Document - NOT LEGALLY BINDING'
     DEFAULT_FONTS = %w[Times Helvetica Courier].freeze
     FONTS_LINE_HEIGHT = {
-      'Times' => 1.4,
-      'Helvetica' => 1.4,
+      'Times' => 1.5,
+      'Helvetica' => 1.5,
       'Courier' => 1.6
+    }.freeze
+
+    PDFA_FONT_MAP = {
+      FONT_NAME => PDFA_FONT_VARIANS,
+      'Helvetica' => PDFA_FONT_VARIANS,
+      'Times' => PDFA_FONT_VARIANS,
+      'Courier' => PDFA_FONT_VARIANS
     }.freeze
 
     MISSING_GLYPH_REPLACE = {
@@ -72,17 +86,17 @@ module Submissions
 
       pdfs_index = generate_pdfs(submitter)
 
-      template = submitter.submission.template
       account = submitter.account
+      submission = submitter.submission
 
       pkcs = Accounts.load_signing_pkcs(account)
       tsa_url = Accounts.load_timeserver_url(account)
 
       image_pdfs = []
-      original_documents = template.documents.preload(:blob)
+      original_documents = submission.schema_documents.preload(:blob)
 
       result_attachments =
-        submitter.submission.template_schema.filter_map do |item|
+        submission.template_schema.filter_map do |item|
           pdf = pdfs_index[item['attachment_uuid']]
 
           next if pdf.nil?
@@ -114,7 +128,7 @@ module Submissions
           tsa_url:,
           pkcs:,
           uuid: images_pdf_uuid(original_documents.select(&:image?)),
-          name: template.name
+          name: submission.name || submission.template.name
         )
 
       ApplicationRecord.no_touching do
@@ -124,10 +138,17 @@ module Submissions
 
     def generate_pdfs(submitter)
       configs = submitter.account.account_configs.where(key: [AccountConfig::FLATTEN_RESULT_PDF_KEY,
-                                                              AccountConfig::WITH_SIGNATURE_ID])
+                                                              AccountConfig::WITH_SIGNATURE_ID,
+                                                              AccountConfig::WITH_FILE_LINKS_KEY,
+                                                              AccountConfig::WITH_SUBMITTER_TIMEZONE_KEY,
+                                                              AccountConfig::WITH_SIGNATURE_ID_REASON_KEY])
 
       with_signature_id = configs.find { |c| c.key == AccountConfig::WITH_SIGNATURE_ID }&.value == true
       is_flatten = configs.find { |c| c.key == AccountConfig::FLATTEN_RESULT_PDF_KEY }&.value != false
+      with_submitter_timezone = configs.find { |c| c.key == AccountConfig::WITH_SUBMITTER_TIMEZONE_KEY }&.value == true
+      with_file_links = configs.find { |c| c.key == AccountConfig::WITH_FILE_LINKS_KEY }&.value == true
+      with_signature_id_reason =
+        configs.find { |c| c.key == AccountConfig::WITH_SIGNATURE_ID_REASON_KEY }&.value != false
 
       pdfs_index = build_pdfs_index(submitter.submission, submitter:, flatten: is_flatten)
 
@@ -171,23 +192,30 @@ module Submissions
         end
       end
 
-      fill_submitter_fields(submitter, submitter.account, pdfs_index, with_signature_id:, is_flatten:)
+      fill_submitter_fields(submitter, submitter.account, pdfs_index, with_signature_id:, is_flatten:,
+                                                                      with_submitter_timezone:,
+                                                                      with_file_links:,
+                                                                      with_signature_id_reason:)
     end
 
-    def fill_submitter_fields(submitter, account, pdfs_index, with_signature_id:, is_flatten:, with_headings: nil)
+    def fill_submitter_fields(submitter, account, pdfs_index, with_signature_id:, is_flatten:, with_headings: nil,
+                              with_submitter_timezone: false, with_signature_id_reason: true, with_file_links: nil)
       cell_layouter = HexaPDF::Layout::TextLayouter.new(text_valign: :center, text_align: :center)
 
       attachments_data_cache = {}
 
-      return pdfs_index if submitter.submission.template_fields.blank?
+      submission = submitter.submission
 
-      with_headings = find_last_submitter(submitter.submission, submitter:).blank? if with_headings.nil?
+      with_headings = find_last_submitter(submission, submitter:).blank? if with_headings.nil?
 
       locale = submitter.metadata.fetch('lang', account.locale)
 
-      submitter.submission.template_fields.each do |field|
-        next if field['type'] == 'heading' && !with_headings
-        next if field['submitter_uuid'] != submitter.uuid && field['type'] != 'heading'
+      (submission.template_fields || submission.template.fields).each do |field|
+        next if !with_headings &&
+                (field['type'] == 'heading' || (field['type'] == 'strikethrough' && field['conditions'].blank?))
+
+        next if field['submitter_uuid'] != submitter.uuid && field['type'] != 'heading' &&
+                (field['type'] != 'strikethrough' || field['conditions'].present?)
 
         field.fetch('areas', []).each do |area|
           pdf = pdfs_index[area['attachment_uuid']]
@@ -202,7 +230,7 @@ module Submissions
 
           page[:Annots] ||= []
           page[:Annots] = page[:Annots].try(:reject) do |e|
-            next if e.is_a?(Integer)
+            next if e.is_a?(Integer) || e.is_a?(Symbol)
 
             e.present? && e[:A] && e[:A][:URI].to_s.starts_with?('file:///docuseal_field')
           end || page[:Annots]
@@ -223,7 +251,7 @@ module Submissions
           font_name = FONT_NAME unless font_name.in?(DEFAULT_FONTS)
 
           if font_variant != :none && font_name == FONT_NAME
-            font_name = FONT_VARIANS[font_variant]
+            font_name = FONT_VARIANS[font_variant] if FONT_VARIANS[font_variant]
             font_variant = nil unless font_name.in?(DEFAULT_FONTS)
           end
 
@@ -231,6 +259,7 @@ module Submissions
 
           value = submitter.values[field['uuid']]
           value = field['default_value'] if field['type'] == 'heading'
+          value = field['default_value'] if field['type'] == 'strikethrough' && value.nil? && field['conditions'].blank?
 
           text_align = field.dig('preferences', 'align').to_s.to_sym.presence ||
                        (value.to_s.match?(RTL_REGEXP) ? :right : :left)
@@ -252,20 +281,44 @@ module Submissions
           canvas = page.canvas(type: :overlay)
           canvas.font(FONT_NAME, size: font_size)
 
-          case field['type']
+          field_type = field['type']
+          field_type = 'file' if field_type == 'image' &&
+                                 !submitter.attachments.find { |a| a.uuid == value }.image?
+
+          if field_type == 'signature' && field.dig('preferences', 'with_signature_id').in?([true, false])
+            with_signature_id = field['preferences']['with_signature_id']
+          end
+
+          case field_type
           when ->(type) { type == 'signature' && (with_signature_id || field.dig('preferences', 'reason_field_uuid')) }
             attachment = submitter.attachments.find { |a| a.uuid == value }
 
-            image = load_vips_image(attachment, attachments_data_cache).autorot
+            image =
+              begin
+                load_vips_image(attachment, attachments_data_cache).autorot
+              rescue Vips::Error
+                next unless attachment.content_type.starts_with?('image/')
+                next if attachment.byte_size.zero?
+
+                raise
+              end
 
             reason_value = submitter.values[field.dig('preferences', 'reason_field_uuid')].presence
 
             reason_string =
               I18n.with_locale(locale) do
-                "#{reason_value ? "#{I18n.t('reason')}: " : ''}#{reason_value || I18n.t('digitally_signed_by')} " \
-                  "#{submitter.name}#{submitter.email.present? ? " <#{submitter.email}>" : ''}\n" \
-                  "#{I18n.l(attachment.created_at.in_time_zone(submitter.account.timezone), format: :long)} " \
-                  "#{TimeUtils.timezone_abbr(submitter.account.timezone, attachment.created_at)}"
+                timezone = submitter.account.timezone
+                timezone = submitter.timezone || submitter.account.timezone if with_submitter_timezone
+
+                if with_signature_id_reason
+                  "#{"#{I18n.t('reason')}: " if reason_value}#{reason_value || I18n.t('digitally_signed_by')} " \
+                    "#{submitter.name}#{" <#{submitter.email}>" if submitter.email.present?}\n" \
+                    "#{I18n.l(attachment.created_at.in_time_zone(timezone), format: :long)} " \
+                    "#{TimeUtils.timezone_abbr(timezone, attachment.created_at)}"
+                else
+                  "#{I18n.l(attachment.created_at.in_time_zone(timezone), format: :long)} " \
+                    "#{TimeUtils.timezone_abbr(timezone, attachment.created_at)}"
+                end
               end
 
             reason_text = HexaPDF::Layout::TextFragment.create(reason_string,
@@ -397,8 +450,7 @@ module Submissions
                 cv.image(PdfIcons.paperclip_io, at: [0, 0], width: box.content_width)
               end
 
-              acc << HexaPDF::Layout::TextFragment.create("#{attachment.filename}\n", font:,
-                                                                                      font_size:)
+              acc << HexaPDF::Layout::TextFragment.create("#{attachment.filename}\n", font:, font_size:)
             end
 
             lines = layouter.fit(items, area['w'] * width, height).lines
@@ -418,6 +470,13 @@ module Submissions
 
               diff = ((area['h'] * height) / 2) - (lines.sum(&:height) / 2)
 
+              url =
+                if with_file_links
+                  ActiveStorage::Blob.proxy_url(attachment.blob)
+                else
+                  r.submissions_preview_url(submission.slug, **Docuseal.default_url_options)
+                end
+
               page[:Annots] << pdf.add(
                 {
                   Type: :Annot, Subtype: :Link,
@@ -429,8 +488,7 @@ module Submissions
                     height - (area['y'] * height) - lines[..next_index].sum(&:height) +
                     height_diff - (height_diff.zero? ? diff : 0)
                   ],
-                  A: { Type: :Action, S: :URI,
-                       URI: ActiveStorage::Blob.proxy_url(attachment.blob) }
+                  A: { Type: :Action, S: :URI, URI: url }
                 }
               )
 
@@ -510,6 +568,43 @@ module Submissions
               cell_layouter.fit([text], cell_width, [line_height, area['h'] * height].max)
                            .draw(canvas, x, height - (area['y'] * height))
             end
+          when 'strikethrough'
+            scale = 1000.0 / width
+
+            line_width = 6.0 / scale
+            area_height = area['h'] * height
+
+            if area_height * scale < 40.0
+              canvas.tap do |c|
+                c.stroke_color(field.dig('preferences', 'color').presence || 'red')
+                c.line_width(line_width)
+                c.line(width * area['x'],
+                       height - (height * area['y']) - (area_height / 2),
+                       (width * area['x']) + (width * area['w']),
+                       height - (height * area['y']) - (area_height / 2))
+                c.stroke
+              end
+            else
+              canvas.tap do |c|
+                c.stroke_color(field.dig('preferences', 'color').presence || 'red')
+                c.line_width(line_width)
+                c.line((width * area['x']) + (line_width / 2),
+                       height - (height * area['y']) - (line_width / 2),
+                       (width * area['x']) + (width * area['w']) - (line_width / 2),
+                       height - (height * area['y']) - area_height + (line_width / 2))
+                c.stroke
+              end
+
+              canvas.tap do |c|
+                c.stroke_color(field.dig('preferences', 'color').presence || 'red')
+                c.line_width(line_width)
+                c.line((width * area['x']) + (line_width / 2),
+                       height - (height * area['y']) - area_height + (line_width / 2),
+                       (width * area['x']) + (width * area['w']) - (line_width / 2),
+                       height - (height * area['y']) - (line_width / 2))
+                c.stroke
+              end
+            end
           else
             if field['type'] == 'date'
               value = TimeUtils.format_date_string(value, field.dig('preferences', 'format'), locale)
@@ -587,6 +682,11 @@ module Submissions
 
       pdf.trailer.info[:Creator] = info_creator
 
+      if Docuseal.pdf_format == 'pdf/a-3b'
+        pdf.task(:pdfa, level: '3b')
+        pdf.config['font.map'] = PDFA_FONT_MAP
+      end
+
       sign_reason = fetch_sign_reason(submitter)
 
       if sign_reason && pkcs
@@ -599,7 +699,7 @@ module Submissions
 
         begin
           pdf.sign(io, write_options: { validate: false }, **sign_params)
-        rescue HexaPDF::MalformedPDFError => e
+        rescue HexaPDF::MalformedPDFError, NoMethodError => e
           Rollbar.error(e) if defined?(Rollbar)
 
           pdf.sign(io, write_options: { validate: false, incremental: false }, **sign_params)
@@ -609,7 +709,7 @@ module Submissions
       else
         begin
           pdf.write(io, incremental: true, validate: false)
-        rescue HexaPDF::MalformedPDFError => e
+        rescue HexaPDF::MalformedPDFError, NoMethodError => e
           Rollbar.error(e) if defined?(Rollbar)
 
           pdf.write(io, incremental: false, validate: false)
@@ -656,14 +756,14 @@ module Submissions
       Submissions::EnsureResultGenerated.call(latest_submitter) if latest_submitter
 
       documents   = latest_submitter&.documents&.preload(:blob).to_a.presence
-      documents ||= submission.template_schema_documents.preload(:blob)
+      documents ||= submission.schema_documents.preload(:blob)
 
       attachment_uuids = Submissions.filtered_conditions_schema(submission).pluck('attachment_uuid')
       attachments_index = documents.index_by { |a| a.metadata['original_uuid'] || a.uuid }
 
       attachment_uuids.each_with_object({}) do |uuid, acc|
         attachment = attachments_index[uuid]
-        attachment ||= submission.template_schema_documents.preload(:blob).find { |a| a.uuid == uuid }
+        attachment ||= submission.schema_documents.preload(:blob).find { |a| a.uuid == uuid }
 
         next unless attachment
 
@@ -696,11 +796,15 @@ module Submissions
     def maybe_rotate_pdf(pdf)
       return pdf if pdf.pages.size > MAX_PAGE_ROTATE
 
+      is_pages_rotated = pdf.pages.root[:Rotate].present? && pdf.pages.root[:Rotate] != 0
+
+      pdf.pages.root[:Rotate] = 0 if is_pages_rotated
+
       is_rotated = pdf.pages.filter_map do |page|
         page.rotate(0, flatten: true) if page[:Rotate] != 0
       end.present?
 
-      return pdf unless is_rotated
+      return pdf if !is_rotated && !is_pages_rotated
 
       io = StringIO.new
 
@@ -729,7 +833,7 @@ module Submissions
     def find_last_submitter(submission, submitter: nil)
       submission.submitters
                 .select(&:completed_at?)
-                .select { |e| submitter.nil? ? true : e.id != submitter.id && e.completed_at <= submitter.completed_at }
+                .select { |e| submitter.nil? || (e.id != submitter.id && e.completed_at <= submitter.completed_at) }
                 .max_by(&:completed_at)
     end
 
@@ -822,7 +926,7 @@ module Submissions
       end
     end
 
-    def h
+    def r
       Rails.application.routes.url_helpers
     end
   end

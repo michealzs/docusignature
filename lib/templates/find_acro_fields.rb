@@ -78,7 +78,7 @@ module Templates
           next if attrs[:w].zero? || attrs[:h].zero?
 
           if child_field[:MaxLen] && child_field.try(:concrete_field_type) == :comb_text_field
-            attrs[:cell_w] = w / page_width / child_field[:MaxLen].to_f
+            attrs[:cell_w] = w / page_width.to_f / child_field[:MaxLen].to_f
           end
 
           attrs
@@ -225,7 +225,10 @@ module Templates
         is_option_number = option.is_a?(Symbol) && option.to_s.match?(/\A\d+\z/)
 
         option = option[1] if option.is_a?(Array) && option.size == 2
-        option = option.encode('utf-8', invalid: :replace, undef: :replace, replace: '') if option.is_a?(String)
+
+        if option.is_a?(String) || option.is_a?(Symbol)
+          option = option.to_s.encode('utf-8', invalid: :replace, undef: :replace, replace: '')
+        end
 
         next if type == 'select' && option.to_s.match?(SELECT_PLACEHOLDER_REGEXP)
 

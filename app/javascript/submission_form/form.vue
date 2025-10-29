@@ -23,7 +23,7 @@
   <FormulaFieldAreas
     v-if="formulaFields.length"
     :fields="formulaFields"
-    :readonly-values="readonlyConditionalFieldValues"
+    :readonly-values="readonlyFieldValues"
     :values="values"
   />
   <Teleport
@@ -67,7 +67,7 @@
   <button
     v-if="!isFormVisible"
     id="expand_form_button"
-    class="btn btn-neutral flex text-white absolute bottom-0 w-full mb-3 expand-form-button"
+    class="btn btn-neutral flex text-white absolute bottom-0 w-full mb-3 expand-form-button text-base"
     style="width: 96%; margin-left: 2%"
     @click.prevent="[isFormVisible = true, scrollIntoField(currentField)]"
   >
@@ -349,10 +349,10 @@
                         :id="field.uuid"
                         type="checkbox"
                         class="base-checkbox !h-7 !w-7"
-                        :oninvalid="`this.setCustomValidity('${t('please_check_the_box_to_continue')}')`"
-                        :onchange="`this.setCustomValidity(validity.valueMissing ? '${t('please_check_the_box_to_continue')}' : '');`"
                         :required="field.required"
                         :checked="!!values[field.uuid]"
+                        @invalid="$event.target.setCustomValidity(t('please_check_the_box_to_continue'))"
+                        @change="$event.target.setCustomValidity($event.target.validity.valueMissing ? t('please_check_the_box_to_continue') : '')"
                         @click="[scrollIntoField(field), values[field.uuid] = !values[field.uuid]]"
                       >
                       <span
@@ -454,7 +454,9 @@
             v-model="values[currentField.uuid]"
             :field="currentField"
             :submitter-slug="submitterSlug"
+            :fields="formulaFields"
             :values="values"
+            :readonly-values="readonlyFieldValues"
             @attached="attachments.push($event)"
             @focus="scrollIntoField(currentField)"
             @submit="!isSubmitting && submitStep()"
@@ -572,6 +574,7 @@ import FormCompleted from './completed'
 import { IconInnerShadowTop, IconArrowsDiagonal, IconWritingSign, IconArrowsDiagonalMinimize2 } from '@tabler/icons-vue'
 import AppearsOn from './appears_on'
 import i18n from './i18n'
+import { sanitizeUrl } from '@braintree/sanitize-url'
 
 const isEmpty = (obj) => {
   if (obj == null) return true
@@ -871,7 +874,14 @@ export default {
     },
     readonlyConditionalFieldValues () {
       return this.readonlyConditionalFields.reduce((acc, f) => {
-        acc[f.uuid] = (this.values[f.uuid] || f.default_value)
+        acc[f.uuid] = isEmpty(this.values[f.uuid]) ? f.default_value : this.values[f.uuid]
+
+        return acc
+      }, {})
+    },
+    readonlyFieldValues () {
+      return this.readonlyFields.reduce((acc, f) => {
+        acc[f.uuid] = isEmpty(this.values[f.uuid]) ? f.default_value : this.values[f.uuid]
 
         return acc
       }, {})
@@ -971,7 +981,10 @@ export default {
       return this.currentStepFields[0]
     },
     readonlyConditionalFields () {
-      return this.fields.filter((f) => f.readonly && f.conditions?.length && this.checkFieldConditions(f) && this.checkFieldDocumentsConditions(f))
+      return this.readonlyFields.filter((f) => f.conditions?.length)
+    },
+    readonlyFields () {
+      return this.fields.filter((f) => f.readonly && this.checkFieldConditions(f) && this.checkFieldDocumentsConditions(f))
     },
     stepFields () {
       const verificationFields = []
@@ -1014,7 +1027,11 @@ export default {
           const aArea = (fieldAreasIndex[aField.uuid] ||= [...(aField.areas || [])].sort(sortArea)[0])
           const bArea = (fieldAreasIndex[bField.uuid] ||= [...(bField.areas || [])].sort(sortArea)[0])
 
-          return sortArea(aArea, bArea)
+          if (aArea && bArea) {
+            return sortArea(aArea, bArea)
+          } else {
+            return 0
+          }
         })
       }
 
@@ -1390,6 +1407,7 @@ export default {
 
         if (isLastStep && !emptyRequiredField && !this.inviteSubmitters.length && !this.optionalInviteSubmitters.length) {
           formData.append('completed', 'true')
+          formData.append('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone)
         }
 
         let saveStepRequest
@@ -1475,7 +1493,7 @@ export default {
       }
 
       if (this.completedRedirectUrl) {
-        window.location.href = this.completedRedirectUrl
+        window.location.href = sanitizeUrl(this.completedRedirectUrl)
       }
     }
   }

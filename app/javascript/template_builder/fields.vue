@@ -26,6 +26,8 @@
       :field="field"
       :type-index="fields.filter((f) => f.type === field.type).indexOf(field)"
       :editable="editable"
+      :with-signature-id="withSignatureId"
+      :with-prefillable="withPrefillable"
       :default-field="defaultFieldsIndex[field.name]"
       :draggable="editable"
       @dragstart="[fieldsDragFieldRef.value = field, removeDragOverlay($event), setDragPlaceholder($event)]"
@@ -253,6 +255,16 @@ export default {
       required: false,
       default: null
     },
+    withSignatureId: {
+      type: Boolean,
+      required: false,
+      default: null
+    },
+    withPrefillable: {
+      type: Boolean,
+      required: false,
+      default: false
+    },
     template: {
       type: Object,
       required: true
@@ -339,6 +351,9 @@ export default {
         return acc
       }, {})
     },
+    skipTypes () {
+      return ['heading', 'datenow', 'strikethrough']
+    },
     fieldIconsSorted () {
       if (this.fieldTypes.length) {
         return this.fieldTypes.reduce((acc, type) => {
@@ -347,7 +362,7 @@ export default {
           return acc
         }, {})
       } else {
-        return Object.fromEntries(Object.entries(this.fieldIcons).filter(([key]) => key !== 'heading'))
+        return Object.fromEntries(Object.entries(this.fieldIcons).filter(([key]) => !this.skipTypes.includes(key)))
       }
     },
     submitterFields () {

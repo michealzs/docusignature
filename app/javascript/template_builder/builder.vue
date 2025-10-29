@@ -260,8 +260,12 @@
           :style="{ backgroundColor }"
         >
           <Upload
-            v-if="sortedDocuments.length && editable && withUploadButton"
+            v-if="editable && withUploadButton"
+            v-show="sortedDocuments.length"
+            ref="upload"
             :accept-file-types="acceptFileTypes"
+            :authenticity-token="authenticityToken"
+            :with-google-drive="withGoogleDrive"
             :template-id="template.id"
             @success="updateFromUpload"
           />
@@ -297,6 +301,8 @@
               v-if="withUploadButton"
               :template-id="template.id"
               :accept-file-types="acceptFileTypes"
+              :with-google-drive="withGoogleDrive"
+              @click-google-drive="$refs.upload.openGoogleDriveModal()"
               @success="updateFromUpload"
             />
             <button
@@ -330,6 +336,8 @@
                 :input-mode="inputMode"
                 :default-fields="[...defaultRequiredFields, ...defaultFields]"
                 :allow-draw="!onlyDefinedFields || drawField"
+                :with-signature-id="withSignatureId"
+                :with-prefillable="withPrefillable"
                 :data-document-uuid="document.uuid"
                 :default-submitters="defaultSubmitters"
                 :drag-field-placeholder="fieldsDragFieldRef.value || dragField"
@@ -366,6 +374,8 @@
                 v-if="withUploadButton"
                 :template-id="template.id"
                 :accept-file-types="acceptFileTypes"
+                :authenticity-token="authenticityToken"
+                :with-google-drive="withGoogleDrive"
                 @success="updateFromUpload"
               />
               <button
@@ -400,7 +410,10 @@
           :style="{ backgroundColor }"
         >
           <div class="bg-base-200 rounded-lg p-5 text-center space-y-4 draw-field-container">
-            <p>
+            <p v-if="(drawField?.type || drawFieldType) === 'strikethrough'">
+              {{ t('draw_strikethrough_the_document') }}
+            </p>
+            <p v-else>
               {{ t('draw_field_on_the_document') }}
             </p>
             <div>
@@ -411,7 +424,7 @@
                 {{ t('cancel') }}
               </button>
               <a
-                v-if="!drawField && !drawOption && !['stamp', 'signature', 'initials', 'heading'].includes(drawField?.type || drawFieldType)"
+                v-if="!drawField && !drawOption && !['stamp', 'signature', 'initials', 'heading', 'strikethrough'].includes(drawField?.type || drawFieldType)"
                 href="#"
                 class="link block mt-3 text-sm"
                 @click.prevent="[addField(drawFieldType), drawField = null, drawOption = null, withSelectedFieldType ? '' : drawFieldType = '', showDrawField = false]"
@@ -436,6 +449,8 @@
             :default-required-fields="defaultRequiredFields"
             :field-types="fieldTypes"
             :with-sticky-submitters="withStickySubmitters"
+            :with-signature-id="withSignatureId"
+            :with-prefillable="withPrefillable"
             :only-defined-fields="onlyDefinedFields"
             :editable="editable"
             :show-tour-start-form="showTourStartForm"
@@ -542,6 +557,7 @@ export default {
       isPaymentConnected: this.isPaymentConnected,
       withFormula: this.withFormula,
       withConditions: this.withConditions,
+      isInlineSize: this.isInlineSize,
       defaultDrawFieldType: this.defaultDrawFieldType,
       selectedAreaRef: computed(() => this.selectedAreaRef),
       fieldsDragFieldRef: computed(() => this.fieldsDragFieldRef)
@@ -561,6 +577,11 @@ export default {
       type: Boolean,
       required: false,
       default: false
+    },
+    withSignatureId: {
+      type: Boolean,
+      required: false,
+      default: null
     },
     backgroundColor: {
       type: String,
@@ -650,7 +671,7 @@ export default {
     acceptFileTypes: {
       type: String,
       required: false,
-      default: 'image/*, application/pdf'
+      default: 'image/*, application/pdf, application/zip'
     },
     baseUrl: {
       type: String,
@@ -753,6 +774,11 @@ export default {
       required: false,
       default: false
     },
+    withGoogleDrive: {
+      type: Boolean,
+      required: false,
+      default: false
+    },
     onlyDefinedFields: {
       type: Boolean,
       required: false,
@@ -792,6 +818,16 @@ export default {
     fieldsDragFieldRef: () => ref(),
     language () {
       return this.locale.split('-')[0].toLowerCase()
+    },
+    withPrefillable () {
+      if (this.template.fields) {
+        return this.template.fields.some((f) => f.prefillable)
+      } else {
+        return false
+      }
+    },
+    isInlineSize () {
+      return CSS.supports('container-type: size')
     },
     isMobile () {
       const isMobileSafariIos = 'ontouchstart' in window && navigator.maxTouchPoints > 0 && /AppleWebKit/i.test(navigator.userAgent)
@@ -1045,17 +1081,33 @@ export default {
       }
 
       if (['select', 'multiple', 'radio'].includes(type)) {
-        field.options = [{ value: '', uuid: v4() }]
+        field.options = [{ value: '', uuid: v4() }, { value: '', uuid: v4() }]
       }
 
       if (type === 'stamp') {
         field.readonly = true
       }
 
+      if (type === 'datenow') {
+        field.type = 'date'
+        field.readonly = true
+        field.default_value = '{{date}}'
+      }
+
       if (type === 'date') {
         field.preferences = {
           format: this.defaultDateFormat
         }
+      }
+
+      if (field.type === 'strikethrough') {
+        field.readonly = true
+        field.default_value = true
+      }
+
+      if (type === 'signature' && [true, false].includes(this.withSignatureId)) {
+        field.preferences ||= {}
+        field.preferences.with_signature_id = this.withSignatureId
       }
 
       this.template.fields.push(field)
@@ -1078,7 +1130,7 @@ export default {
         }
 
         if (['select', 'multiple', 'radio'].includes(type)) {
-          field.options = [{ value: '', uuid: v4() }]
+          field.options = [{ value: '', uuid: v4() }, { value: '', uuid: v4() }]
         }
 
         if (type === 'stamp') {
@@ -1234,24 +1286,31 @@ export default {
       if (!field.areas.length) {
         this.template.fields.splice(this.template.fields.indexOf(field), 1)
 
-        this.template.fields.forEach((f) => {
-          (f.conditions || []).forEach((c) => {
+        this.removeFieldConditions(field)
+      }
+
+      this.save()
+    },
+    removeFieldConditions (field) {
+      this.template.fields.forEach((f) => {
+        if (f.conditions) {
+          f.conditions.forEach((c) => {
             if (c.field_uuid === field.uuid) {
               f.conditions.splice(f.conditions.indexOf(c), 1)
             }
           })
-        })
+        }
+      })
 
-        this.template.schema.forEach((item) => {
-          (item.conditions || []).forEach((c) => {
+      this.template.schema.forEach((item) => {
+        if (item.conditions) {
+          item.conditions.forEach((c) => {
             if (c.field_uuid === field.uuid) {
               item.conditions.splice(item.conditions.indexOf(c), 1)
             }
           })
-        })
-      }
-
-      this.save()
+        }
+      })
     },
     pasteField () {
       const field = this.template.fields.find((f) => f.areas?.includes(this.copiedArea))
@@ -1270,7 +1329,13 @@ export default {
           this.copiedArea.option_uuid ||= field.options[0].uuid
           area.option_uuid = v4()
 
-          field.options.push({ uuid: area.option_uuid })
+          const lastOption = field.options[field.options.length - 1]
+
+          if (!field.areas.find((a) => lastOption.uuid === a.option_uuid)) {
+            area.option_uuid = lastOption.uuid
+          } else {
+            field.options.push({ uuid: area.option_uuid })
+          }
 
           field.areas.push(area)
         } else {
@@ -1313,6 +1378,9 @@ export default {
       } else if (type === 'initials') {
         area.w = pageMask.clientWidth / 10 / pageMask.clientWidth
         area.h = (pageMask.clientWidth / 35 / pageMask.clientWidth)
+      } else if (type === 'strikethrough') {
+        area.w = pageMask.clientWidth / 5 / pageMask.clientWidth
+        area.h = (pageMask.clientWidth / 70 / pageMask.clientWidth)
       } else {
         area.w = pageMask.clientWidth / 5 / pageMask.clientWidth
         area.h = (pageMask.clientWidth / 35 / pageMask.clientWidth)
@@ -1446,17 +1514,32 @@ export default {
           if (this.dragField?.options?.length) {
             field.options = this.dragField.options.map(option => ({ value: option, uuid: v4() }))
           } else {
-            field.options = [{ value: '', uuid: v4() }]
+            field.options = [{ value: '', uuid: v4() }, { value: '', uuid: v4() }]
           }
         }
 
-        if (['stamp', 'heading'].includes(field.type)) {
+        if (field.type === 'datenow') {
+          field.type = 'date'
           field.readonly = true
+          field.default_value = '{{date}}'
+        }
+
+        if (['stamp', 'heading', 'strikethrough'].includes(field.type)) {
+          field.readonly = true
+
+          if (field.type === 'strikethrough') {
+            field.default_value = true
+          }
         }
 
         if (field.type === 'date') {
           field.preferences ||= {}
           field.preferences.format ||= this.defaultDateFormat
+        }
+
+        if (field.type === 'signature' && [true, false].includes(this.withSignatureId)) {
+          field.preferences ||= {}
+          field.preferences.with_signature_id = this.withSignatureId
         }
       }
 
@@ -1533,6 +1616,11 @@ export default {
           baseArea = {
             w: area.maskW / 10 / area.maskW,
             h: area.maskW / 35 / area.maskW
+          }
+        } else if (fieldType === 'strikethrough') {
+          baseArea = {
+            w: area.maskW / 5 / area.maskW,
+            h: area.maskW / 70 / area.maskW
           }
         } else {
           baseArea = {
@@ -1667,16 +1755,24 @@ export default {
           })
         })
 
-        this.template.fields =
-          this.template.fields.filter((f) => !removedFieldUuids.includes(f.uuid) || f.areas?.length)
+        this.template.fields = this.template.fields.reduce((acc, f) => {
+          if (removedFieldUuids.includes(f.uuid) && !f.areas?.length) {
+            this.removeFieldConditions(f)
+          } else {
+            acc.push(f)
+          }
+
+          return acc
+        }, [])
 
         this.save()
       }
     },
     onDocumentReplace (data) {
       const { replaceSchemaItem, schema, documents } = data
+      const { google_drive_file_id, ...cleanedReplaceSchemaItem } = replaceSchemaItem
 
-      this.template.schema.splice(this.template.schema.indexOf(replaceSchemaItem), 1, { ...replaceSchemaItem, ...schema[0] })
+      this.template.schema.splice(this.template.schema.indexOf(replaceSchemaItem), 1, { ...cleanedReplaceSchemaItem, ...schema[0] })
       this.template.documents.push(...documents)
 
       if (data.fields) {

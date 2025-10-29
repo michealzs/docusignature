@@ -9,7 +9,7 @@
     <div class="modal-box pt-4 pb-6 px-6 mt-20 max-h-none w-full max-w-xl">
       <div class="flex justify-between items-center border-b pb-2 mb-2 font-medium">
         <span class="modal-title">
-          {{ t('condition') }} - {{ item.name || buildDefaultName(item, template.fields) }}
+          {{ t('condition') }} - {{ (defaultField ? (defaultField.title || item.title || item.name) : item.name) || buildDefaultName(item, template.fields) }}
         </span>
         <a
           href="#"
@@ -160,6 +160,11 @@ export default {
       type: Object,
       required: true
     },
+    defaultField: {
+      type: Object,
+      required: false,
+      default: null
+    },
     buildDefaultName: {
       type: Function,
       required: true
@@ -172,10 +177,13 @@ export default {
     }
   },
   computed: {
+    excludeTypes () {
+      return ['heading', 'strikethrough']
+    },
     fields () {
       if (this.item.submitter_uuid) {
         return this.template.fields.reduce((acc, f) => {
-          if (f !== this.item && (!f.conditions?.length || !f.conditions.find((c) => c.field_uuid === this.item.uuid))) {
+          if (f !== this.item && !this.excludeTypes.includes(f.type) && (!f.conditions?.length || !f.conditions.find((c) => c.field_uuid === this.item.uuid))) {
             acc.push(f)
           }
 
